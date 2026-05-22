@@ -1,0 +1,5 @@
+/argonaut
+/*.test
+/*.cover
+/coverage.out
+/.gocache/
