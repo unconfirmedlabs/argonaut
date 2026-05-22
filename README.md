@@ -105,6 +105,14 @@ Enclave mode:
 
 Parent CID is currently fixed at `3`.
 
+Runtime knobs:
+
+- `ARGONAUT_MAX_CONNECTIONS` controls the per-listener active bridge connection
+  limit. It defaults to `1024`.
+- `ARGONAUT_LOG_CONNECTIONS=false` disables per-connection accept/close logs.
+  This is useful for load tests where synchronous stderr logging can become the
+  benchmark bottleneck.
+
 ## NSM Protocol
 
 The v0.1 protocol is JSON Lines. Each request is one JSON object followed by
@@ -222,6 +230,42 @@ ARGONAUT_SMOKE_KEEP_WORKDIR=1
 With `ARGONAUT_SMOKE_KEEP_WORKDIR=1`, the script keeps the generated EIF,
 console log, host log, and temporary Docker build context for debugging.
 
+## Nitro Inbound Benchmark
+
+Run the hardware benchmark on an EC2 instance with Nitro Enclaves enabled:
+
+```bash
+scripts/nitro-bench.sh
+```
+
+The benchmark builds a benchmark-only EIF containing `/argonaut` and a
+deterministic in-enclave HTTP server. Host-side `vegeta` drives traffic through
+the real inbound path:
+
+```text
+vegeta -> TCP:<httpPort> -> argonaut host -> VSOCK -> argonaut enclave -> enclave HTTP server
+```
+
+The production `argonaut` binary does not include benchmark modes or benchmark
+traffic generation. Benchmark output is written under the generated workdir as
+TSV, JSON, and vegeta binary result files.
+
+Useful benchmark overrides:
+
+```bash
+ARGONAUT_BENCH_HTTP_PORT=18080
+ARGONAUT_BENCH_HTTP_VSOCK_PORT=3000
+ARGONAUT_BENCH_CPUS=2
+ARGONAUT_BENCH_MEMORY=1024
+ARGONAUT_BENCH_MAX_CONNECTIONS=4096
+ARGONAUT_BENCH_RATES="100 250 500 1000"
+ARGONAUT_BENCH_PAYLOADS="0 1024 32768"
+ARGONAUT_BENCH_DURATION=15s
+ARGONAUT_BENCH_KEEP_WORKDIR=1
+ARGONAUT_BENCH_RESULTS_DIR=benchmark-results
+ARGONAUT_BENCH_EXPORT_RAW=1
+```
+
 ## AWS Spot CI Runner
 
 To run the Nitro smoke test from a regular CI worker, use:
@@ -230,10 +274,17 @@ To run the Nitro smoke test from a regular CI worker, use:
 AWS_REGION=us-east-1 scripts/aws-spot-nitro-smoke.sh
 ```
 
+To run the inbound benchmark from a regular CI worker, use:
+
+```bash
+AWS_REGION=us-east-1 scripts/aws-spot-nitro-bench.sh
+```
+
 The runner script provisions a temporary one-time spot EC2 instance, installs
 Nitro Enclaves tooling, Docker, Go, `jq`, and `curl`, copies this repo to the
-instance, runs `scripts/nitro-smoke.sh`, then terminates the instance. By
-default it also creates and deletes a temporary EC2 key pair and security group.
+instance, runs the requested smoke or benchmark command, then terminates the
+instance. By default it also creates and deletes a temporary EC2 key pair and
+security group.
 
 Defaults are intentionally cheap and disposable:
 
@@ -253,6 +304,9 @@ ARGONAUT_CI_SECURITY_GROUP_ID=sg-...
 ARGONAUT_CI_KEY_NAME=existing-key
 ARGONAUT_CI_PRIVATE_KEY_FILE=/path/to/existing-key.pem
 ARGONAUT_CI_SSH_CIDR=203.0.113.10/32
+ARGONAUT_CI_RUN_COMMAND="ARGONAUT_SMOKE_KEEP_WORKDIR=1 scripts/nitro-smoke.sh"
+ARGONAUT_CI_FETCH_PATH=benchmark-results
+ARGONAUT_CI_ARTIFACT_DIR=.argonaut-ci-artifacts/run
 ARGONAUT_CI_KEEP_INSTANCE=1
 ```
 

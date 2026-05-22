@@ -45,9 +45,11 @@ import (
 )
 
 const parentCID = 3
-const maxConcurrentConnections = 1024
+const defaultMaxConcurrentConnections = 1024
 
 var connectionIDs atomic.Uint64
+var configuredMaxConcurrentConnections = envInt("ARGONAUT_MAX_CONNECTIONS", defaultMaxConcurrentConnections)
+var logBridgeConnections = envBool("ARGONAUT_LOG_CONNECTIONS", true)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -140,7 +142,7 @@ func sendConfigVSOCK(cid, port uint32, data []byte) {
 	if err != nil {
 		log.Fatalf("[host] VSOCK dial %d:%d for config: %v", cid, port, err)
 	}
-	if _, err := conn.Write(data); err != nil {
+	if err := writeAll(conn, data); err != nil {
 		conn.Close()
 		log.Fatalf("[host] config write: %v", err)
 	}
@@ -154,7 +156,7 @@ func hostInboundBridge(tcpPort uint16, cid, vsockPort uint32) {
 		log.Fatalf("[host] failed to listen on TCP:%d: %v", tcpPort, err)
 	}
 	log.Printf("[host] inbound TCP:%d → VSOCK:%d:%d", tcpPort, cid, vsockPort)
-	limiter := newConnectionLimiter(maxConcurrentConnections)
+	limiter := newConnectionLimiter(configuredConnectionLimit())
 
 	for {
 		tcp, err := ln.Accept()
@@ -186,7 +188,7 @@ func hostOutboundBridge(ep Endpoint) {
 
 	target := net.JoinHostPort(ep.Host, strconv.Itoa(int(ep.TCPPort)))
 	log.Printf("[host] outbound VSOCK:%d → TCP:%s", ep.VsockPort, target)
-	limiter := newConnectionLimiter(maxConcurrentConnections)
+	limiter := newConnectionLimiter(configuredConnectionLimit())
 
 	for {
 		vc, err := ln.Accept()
@@ -214,7 +216,7 @@ func bridgeToTCPHost(src net.Conn, target string) error {
 	start := time.Now()
 	defer src.Close()
 
-	log.Printf("[bridge:%d] %s → TCP:%s accepted", id, src.RemoteAddr(), target)
+	logConnectionf("[bridge:%d] %s → TCP:%s accepted", id, src.RemoteAddr(), target)
 	tcp, err := (&net.Dialer{Timeout: 30 * time.Second}).Dial("tcp", target)
 	if err != nil {
 		return fmt.Errorf("TCP dial %s: %w", target, err)
@@ -222,7 +224,7 @@ func bridgeToTCPHost(src net.Conn, target string) error {
 	defer tcp.Close()
 
 	result := copyBidirectionalResult(src, tcp)
-	log.Printf("[bridge:%d] closed target=TCP:%s duration=%s a_to_b=%d b_to_a=%d err_a_to_b=%v err_b_to_a=%v",
+	logConnectionf("[bridge:%d] closed target=TCP:%s duration=%s a_to_b=%d b_to_a=%d err_a_to_b=%v err_b_to_a=%v",
 		id, target, time.Since(start), result.AToBBytes, result.BToABytes, result.AToBErr, result.BToAErr)
 	return result.Err()
 }
@@ -232,7 +234,7 @@ func bridgeToVSOCK(src net.Conn, cid, port uint32) error {
 	start := time.Now()
 	defer src.Close()
 
-	log.Printf("[bridge:%d] %s → VSOCK:%d:%d accepted", id, src.RemoteAddr(), cid, port)
+	logConnectionf("[bridge:%d] %s → VSOCK:%d:%d accepted", id, src.RemoteAddr(), cid, port)
 	vc, err := vsock.Dial(cid, port, nil)
 	if err != nil {
 		return fmt.Errorf("VSOCK dial %d:%d: %w", cid, port, err)
@@ -240,7 +242,7 @@ func bridgeToVSOCK(src net.Conn, cid, port uint32) error {
 	defer vc.Close()
 
 	result := copyBidirectionalResult(src, vc)
-	log.Printf("[bridge:%d] closed target=VSOCK:%d:%d duration=%s a_to_b=%d b_to_a=%d err_a_to_b=%v err_b_to_a=%v",
+	logConnectionf("[bridge:%d] closed target=VSOCK:%d:%d duration=%s a_to_b=%d b_to_a=%d err_a_to_b=%v err_b_to_a=%v",
 		id, cid, port, time.Since(start), result.AToBBytes, result.BToABytes, result.AToBErr, result.BToAErr)
 	return result.Err()
 }
@@ -302,7 +304,7 @@ func inboundBridge(vsockPort uint32, tcpPort uint16) {
 		log.Fatalf("[traffic] failed to bind VSOCK:%d: %v", vsockPort, err)
 	}
 	log.Printf("[traffic] inbound VSOCK:%d → TCP:127.0.0.1:%d", vsockPort, tcpPort)
-	limiter := newConnectionLimiter(maxConcurrentConnections)
+	limiter := newConnectionLimiter(configuredConnectionLimit())
 
 	for {
 		vc, err := ln.Accept()
@@ -330,7 +332,7 @@ func bridgeToTCP(src net.Conn, tcpPort uint16) error {
 	defer src.Close()
 
 	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(tcpPort)))
-	log.Printf("[bridge:%d] %s → TCP:%s accepted", id, src.RemoteAddr(), target)
+	logConnectionf("[bridge:%d] %s → TCP:%s accepted", id, src.RemoteAddr(), target)
 	tcp, err := (&net.Dialer{Timeout: 30 * time.Second}).Dial("tcp", target)
 	if err != nil {
 		return fmt.Errorf("TCP dial 127.0.0.1:%d: %w", tcpPort, err)
@@ -338,7 +340,7 @@ func bridgeToTCP(src net.Conn, tcpPort uint16) error {
 	defer tcp.Close()
 
 	result := copyBidirectionalResult(src, tcp)
-	log.Printf("[bridge:%d] closed target=TCP:%s duration=%s a_to_b=%d b_to_a=%d err_a_to_b=%v err_b_to_a=%v",
+	logConnectionf("[bridge:%d] closed target=TCP:%s duration=%s a_to_b=%d b_to_a=%d err_a_to_b=%v err_b_to_a=%v",
 		id, target, time.Since(start), result.AToBBytes, result.BToABytes, result.AToBErr, result.BToAErr)
 	return result.Err()
 }
@@ -350,7 +352,7 @@ func outboundProxy(localIP string, ep Endpoint) {
 		log.Fatalf("[traffic] failed to bind %s: %v", addr, err)
 	}
 	log.Printf("[traffic] outbound TCP:%s → VSOCK:%d:%d", addr, parentCID, ep.VsockPort)
-	limiter := newConnectionLimiter(maxConcurrentConnections)
+	limiter := newConnectionLimiter(configuredConnectionLimit())
 
 	for {
 		tcp, err := ln.Accept()
@@ -509,6 +511,56 @@ func closeWrite(c net.Conn) {
 	if hc, ok := c.(halfCloser); ok {
 		hc.CloseWrite()
 	}
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func configuredConnectionLimit() int {
+	return configuredMaxConcurrentConnections
+}
+
+func logConnectionf(format string, args ...interface{}) {
+	if logBridgeConnections {
+		log.Printf(format, args...)
+	}
+}
+
+func envInt(name string, fallback int) int {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		log.Printf("invalid %s=%q; using %d", name, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(name string, fallback bool) bool {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Printf("invalid %s=%q; using %t", name, value, fallback)
+		return fallback
+	}
+	return parsed
 }
 
 type connectionLimiter struct {

@@ -12,6 +12,11 @@ INSTANCE_TYPE="${ARGONAUT_CI_INSTANCE_TYPE:-c5.xlarge}"
 INSTANCE_NAME="${ARGONAUT_CI_INSTANCE_NAME:-argonaut-nitro-smoke}"
 AMI_SSM_PATH="${ARGONAUT_CI_AMI_SSM_PATH:-/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}"
 REMOTE_DIR="${ARGONAUT_CI_REMOTE_DIR:-/home/ec2-user/argonaut}"
+RUN_COMMAND="${ARGONAUT_CI_RUN_COMMAND:-ARGONAUT_SMOKE_KEEP_WORKDIR=1 scripts/nitro-smoke.sh}"
+FETCH_PATH="${ARGONAUT_CI_FETCH_PATH:-}"
+ARTIFACT_DIR="${ARGONAUT_CI_ARTIFACT_DIR:-$ROOT/.argonaut-ci-artifacts/$(date +%Y%m%d-%H%M%S)}"
+ALLOCATOR_CPUS="${ARGONAUT_CI_ALLOCATOR_CPUS:-${ARGONAUT_BENCH_CPUS:-2}}"
+ALLOCATOR_MEMORY="${ARGONAUT_CI_ALLOCATOR_MEMORY:-${ARGONAUT_BENCH_MEMORY:-1024}}"
 KEEP_INSTANCE="${ARGONAUT_CI_KEEP_INSTANCE:-}"
 KEEP_SECURITY_GROUP="${ARGONAUT_CI_KEEP_SECURITY_GROUP:-}"
 KEEP_KEY_PAIR="${ARGONAUT_CI_KEEP_KEY_PAIR:-}"
@@ -81,11 +86,11 @@ archive_repo() {
     status="$(git -C "$ROOT" status --short)"
     if [[ -n "$status" ]]; then
       log "repo has uncommitted changes; overlaying working tree into archive"
-    COPYFILE_DISABLE=1 tar --exclude='.git' --exclude='argonaut' --exclude='*.test' --exclude='coverage.out' \
+    COPYFILE_DISABLE=1 tar --exclude='.git' --exclude='.argonaut-ci-artifacts' --exclude='argonaut' --exclude='*.test' --exclude='coverage.out' \
         -C "$ROOT" -rf "$out" .
     fi
   else
-    COPYFILE_DISABLE=1 tar --exclude='.git' --exclude='argonaut' --exclude='*.test' --exclude='coverage.out' \
+    COPYFILE_DISABLE=1 tar --exclude='.git' --exclude='.argonaut-ci-artifacts' --exclude='argonaut' --exclude='*.test' --exclude='coverage.out' \
       -C "$ROOT" -cf "$out" .
   fi
 }
@@ -186,15 +191,15 @@ fi
 log "security group: $SECURITY_GROUP_ID"
 
 USER_DATA_FILE="$WORKDIR/user-data.sh"
-cat > "$USER_DATA_FILE" <<'USERDATA'
+cat > "$USER_DATA_FILE" <<USERDATA
 #!/bin/bash
 set -euxo pipefail
 dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker git golang jq tar gzip
 systemctl enable --now docker
 usermod -aG docker ec2-user
 usermod -aG ne ec2-user
-sed -i 's/^memory_mib:.*/memory_mib: 1024/' /etc/nitro_enclaves/allocator.yaml
-sed -i 's/^cpu_count:.*/cpu_count: 2/' /etc/nitro_enclaves/allocator.yaml
+sed -i 's/^memory_mib:.*/memory_mib: $ALLOCATOR_MEMORY/' /etc/nitro_enclaves/allocator.yaml
+sed -i 's/^cpu_count:.*/cpu_count: $ALLOCATOR_CPUS/' /etc/nitro_enclaves/allocator.yaml
 systemctl enable --now nitro-enclaves-allocator
 touch /tmp/argonaut-ci-ready
 USERDATA
@@ -241,9 +246,15 @@ archive_repo "$ARCHIVE"
 log "copying repo archive"
 "${SSH[@]}" "ec2-user@$PUBLIC_IP" "rm -rf '$REMOTE_DIR' && mkdir -p '$REMOTE_DIR'"
 "${SCP[@]}" "$ARCHIVE" "ec2-user@$PUBLIC_IP:$REMOTE_DIR/argonaut.tar"
-"${SSH[@]}" "ec2-user@$PUBLIC_IP" "cd '$REMOTE_DIR' && tar -xf argonaut.tar && rm argonaut.tar && chmod +x scripts/nitro-smoke.sh"
+"${SSH[@]}" "ec2-user@$PUBLIC_IP" "cd '$REMOTE_DIR' && tar -xf argonaut.tar && rm argonaut.tar && chmod +x scripts/nitro-smoke.sh scripts/nitro-bench.sh"
 
-log "running Nitro smoke test on instance"
-"${SSH[@]}" "ec2-user@$PUBLIC_IP" "cd '$REMOTE_DIR' && ARGONAUT_SMOKE_KEEP_WORKDIR=1 scripts/nitro-smoke.sh"
+log "running on instance: $RUN_COMMAND"
+"${SSH[@]}" "ec2-user@$PUBLIC_IP" "cd '$REMOTE_DIR' && $RUN_COMMAND"
 
-log "PASS: Nitro smoke test completed on $INSTANCE_ID"
+if [[ -n "$FETCH_PATH" ]]; then
+  log "fetching remote artifact path $FETCH_PATH to $ARTIFACT_DIR"
+  mkdir -p "$ARTIFACT_DIR"
+  "${SCP[@]}" -r "ec2-user@$PUBLIC_IP:$REMOTE_DIR/$FETCH_PATH" "$ARTIFACT_DIR/"
+fi
+
+log "PASS: command completed on $INSTANCE_ID"
