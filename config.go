@@ -84,6 +84,13 @@ func (e *Endpoint) UnmarshalJSON(data []byte) error {
 	if err := ensureNoTrailingJSON(dec); err != nil {
 		return err
 	}
+	for key := range raw {
+		switch key {
+		case "host", "vsockPort", "tcpPort", "localPort", "localIP":
+		default:
+			return fmt.Errorf("unknown endpoint field %q", key)
+		}
+	}
 
 	if v, ok := raw["host"]; ok {
 		e.hostSet = true

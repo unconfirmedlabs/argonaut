@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -509,8 +510,13 @@ func validNsmID(id string) bool {
 	if id == "" || len(id) > nsmIDMaxSize {
 		return false
 	}
-	for _, r := range id {
-		if r <= ' ' || r == 0x7f {
+	for _, b := range []byte(id) {
+		switch {
+		case b >= 'a' && b <= 'z':
+		case b >= 'A' && b <= 'Z':
+		case b >= '0' && b <= '9':
+		case b == '.', b == '_', b == ':', b == '-':
+		default:
 			return false
 		}
 	}
@@ -545,17 +551,85 @@ func nsmMode() {
 
 	log.Println("[nsm] ready")
 
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024), nsmLineMaxSize)
+	reader := bufio.NewReader(os.Stdin)
 	writer := bufio.NewWriter(os.Stdout)
 
-	for scanner.Scan() {
-		response := handleNsmLine(backend, scanner.Text())
+	for {
+		line, err := readNsmLine(reader)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			var tooLarge *nsmLineTooLargeError
+			if errors.As(err, &tooLarge) {
+				if tooLarge.jsonLike {
+					fmt.Fprintln(writer, marshalNsmJSONResponse(nsmJSONResponse{OK: false, Error: "line_too_large"}))
+				} else {
+					fmt.Fprintln(writer, "0 ERR line_too_large")
+				}
+				writer.Flush()
+				continue
+			}
+			log.Printf("[nsm] stdin error: %v", err)
+			break
+		}
+		response := handleNsmLine(backend, line)
 		fmt.Fprintln(writer, response)
 		writer.Flush()
 	}
+}
 
-	if err := scanner.Err(); err != nil && err != io.EOF {
-		log.Printf("[nsm] stdin error: %v", err)
+type nsmLineTooLargeError struct {
+	jsonLike bool
+}
+
+func (e *nsmLineTooLargeError) Error() string {
+	return "line_too_large"
+}
+
+func readNsmLine(reader *bufio.Reader) (string, error) {
+	var line []byte
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > nsmLineMaxSize {
+			jsonLike := nsmLineLooksJSON(line, fragment)
+			discardNsmLineRemainder(reader, err)
+			return "", &nsmLineTooLargeError{jsonLike: jsonLike}
+		}
+		line = append(line, fragment...)
+
+		switch err {
+		case nil:
+			return strings.TrimRight(string(line), "\r\n"), nil
+		case bufio.ErrBufferFull:
+			continue
+		case io.EOF:
+			if len(line) == 0 {
+				return "", io.EOF
+			}
+			return string(line), nil
+		default:
+			return "", err
+		}
 	}
+}
+
+func discardNsmLineRemainder(reader *bufio.Reader, err error) {
+	for err == bufio.ErrBufferFull {
+		_, err = reader.ReadSlice('\n')
+	}
+}
+
+func nsmLineLooksJSON(parts ...[]byte) bool {
+	for _, part := range parts {
+		for _, b := range part {
+			switch b {
+			case ' ', '\t', '\r', '\n':
+				continue
+			default:
+				return b == '{'
+			}
+		}
+	}
+	return false
 }

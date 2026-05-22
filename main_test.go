@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/mdlayher/vsock"
 )
 
 func TestConfigParsesValidJSON(t *testing.T) {
@@ -234,6 +238,13 @@ func TestEndpointPortDefaults(t *testing.T) {
 	}
 }
 
+func TestEndpointRejectsUnknownFields(t *testing.T) {
+	input := `{"httpVsockPort":3000,"httpTcpPort":3000,"endpoints":[{"host":"sui.io","vsockPort":8443,"tcpport":443}]}`
+	if _, err := ParseConfig([]byte(input)); err == nil {
+		t.Fatal("expected unknown endpoint field to fail parsing")
+	}
+}
+
 func TestConfigSizeLimit(t *testing.T) {
 	_, err := readAllLimited(strings.NewReader(strings.Repeat("x", maxConfigBytes+1)), maxConfigBytes)
 	if err == nil {
@@ -283,6 +294,27 @@ func TestHostConfigIgnoresExtraFields(t *testing.T) {
 	}
 	if cfg.HTTPPort != 8080 {
 		t.Fatalf("expected httpPort 8080, got %d", cfg.HTTPPort)
+	}
+}
+
+func TestWriteHostsUsesMergedContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(path, []byte("127.0.0.1   localhost\n10.0.0.2   internal\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHosts(path, []Endpoint{{Host: "sui.io", VsockPort: 8001}}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(content)
+	if !strings.Contains(got, "10.0.0.2   internal") {
+		t.Fatal("expected existing entry to be preserved")
+	}
+	if !strings.Contains(got, "127.0.0.64   sui.io") {
+		t.Fatal("expected managed entry")
 	}
 }
 
@@ -366,6 +398,19 @@ func TestDialResolvesHostname(t *testing.T) {
 		t.Fatalf("failed to dial localhost:%d: %v", port, err)
 	}
 	conn.Close()
+}
+
+func TestVsockPeerCIDMatches(t *testing.T) {
+	conn := remoteAddrConn{remote: &vsock.Addr{ContextID: 42, Port: 3000}}
+	if !vsockPeerCIDMatches(conn, 42) {
+		t.Fatal("expected matching VSOCK peer CID")
+	}
+	if vsockPeerCIDMatches(conn, 43) {
+		t.Fatal("expected mismatched VSOCK peer CID to be rejected")
+	}
+	if vsockPeerCIDMatches(remoteAddrConn{remote: &net.TCPAddr{}}, 42) {
+		t.Fatal("expected non-VSOCK remote address to be rejected")
+	}
 }
 
 // --- Outbound bridge tests (ported from aws-nitro-enclaves-cli vsock_proxy/src/proxy.rs) ---
@@ -676,4 +721,13 @@ func FuzzParseConfig(f *testing.F) {
 		_ = ValidateConfig(cfg, validationModeHost)
 		_ = ValidateConfig(cfg, validationModeEnclave)
 	})
+}
+
+type remoteAddrConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c remoteAddrConn) RemoteAddr() net.Addr {
+	return c.remote
 }

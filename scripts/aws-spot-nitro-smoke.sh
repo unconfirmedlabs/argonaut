@@ -172,7 +172,7 @@ if [[ -z "$SSH_CIDR" ]]; then
     fi
   fi
 fi
-SSH_CIDR="${SSH_CIDR:-0.0.0.0/0}"
+[[ -n "$SSH_CIDR" ]] || die "could not determine runner public IP; set ARGONAUT_CI_SSH_CIDR explicitly"
 
 if [[ -z "$SECURITY_GROUP_ID" ]]; then
   SG_NAME="argonaut-ci-${SHORT_ID}"

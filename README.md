@@ -84,6 +84,8 @@ Endpoint rules:
 
 - `host` must be non-empty, at most 253 characters, and contain only ASCII
   letters, digits, `.`, `_`, and `-`.
+- Unknown endpoint fields are rejected. Unknown top-level fields are still
+  allowed so application config can pass through unchanged.
 - Empty hostname labels are rejected.
 - `vsockPort` must be in `1..65535` and unique across endpoints.
 - `tcpPort` is optional and defaults to `443`.
@@ -123,6 +125,11 @@ Runtime knobs:
 
 - `ARGONAUT_MAX_CONNECTIONS` controls the per-listener active bridge connection
   limit. It defaults to `1024`.
+- `ARGONAUT_IDLE_TIMEOUT` controls the per-direction bridge read/write idle
+  timeout. It defaults to `5m`; set it to `0` to disable idle deadlines.
+- `ARGONAUT_HTTP_BIND_ADDR` controls the host-mode inbound TCP bind address. It
+  defaults to `0.0.0.0`; set it to `127.0.0.1` when another local proxy or load
+  balancer should own public exposure.
 - `ARGONAUT_LOG_CONNECTIONS=false` disables per-connection accept/close logs.
   This is useful for load tests where synchronous stderr logging can become the
   benchmark bottleneck.
@@ -152,9 +159,10 @@ Errors:
 {"id":"1","ok":false,"error":"invalid_hex"}
 ```
 
-`id` is an opaque non-empty string up to 64 bytes with no whitespace/control
-characters. `nonce` and `userData` are optional. Hex strings are lowercase in
-responses; requests accept any valid Go hex input.
+`id` is an opaque non-empty printable ASCII token up to 64 bytes. Allowed
+characters are letters, digits, `.`, `_`, `:`, and `-`. `nonce` and `userData`
+are optional. Hex strings are lowercase in responses; requests accept any valid
+Go hex input.
 
 For compatibility with existing callers, `argonaut nsm` also accepts the legacy
 space protocol:
@@ -177,9 +185,12 @@ New consumers should use JSON Lines.
 ## Trust Model
 
 The EC2 host is untrusted. Config delivered from the host is treated as untrusted
-input before it can affect `/etc/hosts` or listeners. Attestation freshness is
-the verifier's responsibility; verifiers should send a nonce and verify that the
-returned NSM attestation document contains it.
+input before it can affect `/etc/hosts` or listeners. This validation prevents
+obvious parser and hosts-file abuse, but the config is still application policy:
+use enclave-embedded allowlists, signed config, or verifier-side policy checks
+when a deployment must prevent the host from choosing endpoints. Attestation
+freshness is the verifier's responsibility; verifiers should send a nonce and
+verify that the returned NSM attestation document contains it.
 
 ## Verification
 
@@ -189,13 +200,15 @@ Before tagging a release:
 go test ./...
 go test -race ./...
 go vet ./...
+govulncheck ./...
 go test -run=Fuzz -fuzz=FuzzDecodeNsmResponse -fuzztime=10s
 go test -run=Fuzz -fuzz=FuzzHandleNsmLine -fuzztime=10s
 go test -run=Fuzz -fuzz=FuzzParseConfig -fuzztime=10s
 ```
 
-Run a real Nitro smoke test before publishing binaries; local tests cannot
-exercise `/dev/nsm` or AF_VSOCK on non-Nitro hosts.
+Build release artifacts with a patched Go toolchain and run a real Nitro smoke
+test before publishing binaries; local tests cannot exercise `/dev/nsm` or
+AF_VSOCK on non-Nitro hosts.
 
 ## Nitro Smoke Test
 
@@ -225,6 +238,10 @@ test runner. It verifies:
   `TCP:127.0.0.1:9443 -> VSOCK:3:8100 -> TCP:argonaut-smoke.local:18443`.
 - Host inbound traffic reaches an enclave HTTP endpoint through
   `TCP:127.0.0.1:18080 -> VSOCK:<cid>:3000 -> TCP:127.0.0.1:3000`.
+
+The smoke EIF is launched with Nitro debug mode enabled so the script can read
+the enclave console. Do not use the smoke-test launch flags for production
+enclaves.
 
 Useful environment overrides:
 
@@ -264,6 +281,9 @@ The production `argonaut` binary does not include benchmark modes or benchmark
 traffic generation. The generated workdir contains TSV, JSON, and text
 summaries; raw vegeta binary result files are exported only when
 `ARGONAUT_BENCH_EXPORT_RAW=1`.
+
+The benchmark EIF is launched with Nitro debug mode enabled for observability.
+Benchmark numbers are useful for bridge sizing, not for attestation claims.
 
 Useful benchmark overrides:
 
@@ -401,6 +421,6 @@ ARGONAUT_CI_KEEP_INSTANCE=1
 
 If subnet, security group, or key pair values are omitted, the script uses a
 default subnet and creates temporary SSH access scoped to the CI runner's public
-IP when it can discover it. Set `ARGONAUT_CI_KEEP_INSTANCE=1` only for debugging;
-otherwise cleanup terminates the spot instance and removes temporary AWS
-resources.
+IP. Set `ARGONAUT_CI_SSH_CIDR` explicitly if automatic public IP discovery is
+unavailable. Set `ARGONAUT_CI_KEEP_INSTANCE=1` only for debugging; otherwise
+cleanup terminates the spot instance and removes temporary AWS resources.

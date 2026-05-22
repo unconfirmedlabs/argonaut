@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/fxamacker/cbor/v2"
@@ -243,6 +247,57 @@ func TestHandleJSONInvalidID(t *testing.T) {
 	response := handleNsmLine(FakeBackend{}, `{"id":"bad id","method":"RND"}`)
 	if response != `{"id":"","ok":false,"error":"invalid_id"}` {
 		t.Fatalf("got %q", response)
+	}
+}
+
+func TestHandleJSONRejectsUnicodeID(t *testing.T) {
+	response := handleNsmLine(FakeBackend{}, `{"id":"snowman☃","method":"RND"}`)
+	if response != `{"id":"","ok":false,"error":"invalid_id"}` {
+		t.Fatalf("got %q", response)
+	}
+}
+
+func TestHandleLegacyRejectsUnicodeID(t *testing.T) {
+	response := handleNsmLine(FakeBackend{}, "snowman☃ RND")
+	if response != "0 ERR invalid_id" {
+		t.Fatalf("got %q", response)
+	}
+}
+
+func TestReadNsmLineTooLargeDoesNotPoisonNextLine(t *testing.T) {
+	input := strings.Repeat("a", nsmLineMaxSize+1) + "\n1 RND\n"
+	reader := bufio.NewReader(strings.NewReader(input))
+	_, err := readNsmLine(reader)
+	var tooLarge *nsmLineTooLargeError
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("expected line_too_large, got %v", err)
+	}
+	if tooLarge.jsonLike {
+		t.Fatal("expected non-JSON oversized line")
+	}
+
+	line, err := readNsmLine(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "1 RND" {
+		t.Fatalf("got %q, want %q", line, "1 RND")
+	}
+}
+
+func TestReadNsmLineTooLargeDetectsJSON(t *testing.T) {
+	input := " \t {" + strings.Repeat(" ", nsmLineMaxSize) + "\n"
+	reader := bufio.NewReader(strings.NewReader(input))
+	_, err := readNsmLine(reader)
+	var tooLarge *nsmLineTooLargeError
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("expected line_too_large, got %v", err)
+	}
+	if !tooLarge.jsonLike {
+		t.Fatal("expected oversized JSON-like line")
+	}
+	if _, err := readNsmLine(reader); err != io.EOF {
+		t.Fatalf("expected EOF after discarded line, got %v", err)
 	}
 }
 

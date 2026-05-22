@@ -46,10 +46,13 @@ import (
 
 const parentCID = 3
 const defaultMaxConcurrentConnections = 1024
+const defaultBridgeIdleTimeout = 5 * time.Minute
 
 var connectionIDs atomic.Uint64
 var configuredMaxConcurrentConnections = envInt("ARGONAUT_MAX_CONNECTIONS", defaultMaxConcurrentConnections)
 var logBridgeConnections = envBool("ARGONAUT_LOG_CONNECTIONS", true)
+var configuredBridgeIdleTimeout = envDuration("ARGONAUT_IDLE_TIMEOUT", defaultBridgeIdleTimeout)
+var configuredHostHTTPBindAddr = envString("ARGONAUT_HTTP_BIND_ADDR", "0.0.0.0")
 
 func main() {
 	if len(os.Args) < 2 {
@@ -126,7 +129,7 @@ func hostMode() {
 		wg.Add(1)
 		go func(ep Endpoint) {
 			defer wg.Done()
-			hostOutboundBridge(ep)
+			hostOutboundBridge(ep, uint32(cid))
 		}(ep)
 	}
 
@@ -151,11 +154,12 @@ func sendConfigVSOCK(cid, port uint32, data []byte) {
 }
 
 func hostInboundBridge(tcpPort uint16, cid, vsockPort uint32) {
-	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", tcpPort))
+	addr := net.JoinHostPort(configuredHostHTTPBindAddr, strconv.Itoa(int(tcpPort)))
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("[host] failed to listen on TCP:%d: %v", tcpPort, err)
+		log.Fatalf("[host] failed to listen on TCP:%s: %v", addr, err)
 	}
-	log.Printf("[host] inbound TCP:%d → VSOCK:%d:%d", tcpPort, cid, vsockPort)
+	log.Printf("[host] inbound TCP:%s → VSOCK:%d:%d", addr, cid, vsockPort)
 	limiter := newConnectionLimiter(configuredConnectionLimit())
 
 	for {
@@ -180,7 +184,7 @@ func hostInboundBridge(tcpPort uint16, cid, vsockPort uint32) {
 
 // hostOutboundBridge listens on a VSOCK port for connections from the enclave
 // and bridges them to the endpoint's TCP host:443. This replaces AWS vsock-proxy.
-func hostOutboundBridge(ep Endpoint) {
+func hostOutboundBridge(ep Endpoint, expectedCID uint32) {
 	ln, err := vsock.Listen(ep.VsockPort, nil)
 	if err != nil {
 		log.Fatalf("[host] failed to listen on VSOCK:%d for %s: %v", ep.VsockPort, ep.Host, err)
@@ -194,6 +198,11 @@ func hostOutboundBridge(ep Endpoint) {
 		vc, err := ln.Accept()
 		if err != nil {
 			log.Printf("[host] outbound accept error (VSOCK:%d): %v", ep.VsockPort, err)
+			continue
+		}
+		if !vsockPeerCIDMatches(vc, expectedCID) {
+			log.Printf("[host] outbound rejected VSOCK peer %s on VSOCK:%d; expected CID %d", vc.RemoteAddr(), ep.VsockPort, expectedCID)
+			vc.Close()
 			continue
 		}
 		if !limiter.tryAcquire() {
@@ -223,7 +232,7 @@ func bridgeToTCPHost(src net.Conn, target string) error {
 	}
 	defer tcp.Close()
 
-	result := copyBidirectionalResult(src, tcp)
+	result := copyBidirectionalResult(withIdleTimeout(src), withIdleTimeout(tcp))
 	logConnectionf("[bridge:%d] closed target=TCP:%s duration=%s a_to_b=%d b_to_a=%d err_a_to_b=%v err_b_to_a=%v",
 		id, target, time.Since(start), result.AToBBytes, result.BToABytes, result.AToBErr, result.BToAErr)
 	return result.Err()
@@ -241,7 +250,7 @@ func bridgeToVSOCK(src net.Conn, cid, port uint32) error {
 	}
 	defer vc.Close()
 
-	result := copyBidirectionalResult(src, vc)
+	result := copyBidirectionalResult(withIdleTimeout(src), withIdleTimeout(vc))
 	logConnectionf("[bridge:%d] closed target=VSOCK:%d:%d duration=%s a_to_b=%d b_to_a=%d err_a_to_b=%v err_b_to_a=%v",
 		id, cid, port, time.Since(start), result.AToBBytes, result.BToABytes, result.AToBErr, result.BToAErr)
 	return result.Err()
@@ -277,7 +286,7 @@ func enclaveMode() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		inboundBridge(config.HTTPVsockPort, config.HTTPTCPPort)
+		inboundBridge(config.HTTPVsockPort, config.HTTPTCPPort, parentCID)
 	}()
 
 	// Outbound: TCP listen → VSOCK connect (external services)
@@ -298,7 +307,7 @@ func enclaveMode() {
 	os.Exit(1)
 }
 
-func inboundBridge(vsockPort uint32, tcpPort uint16) {
+func inboundBridge(vsockPort uint32, tcpPort uint16, expectedCID uint32) {
 	ln, err := vsock.Listen(vsockPort, nil)
 	if err != nil {
 		log.Fatalf("[traffic] failed to bind VSOCK:%d: %v", vsockPort, err)
@@ -310,6 +319,11 @@ func inboundBridge(vsockPort uint32, tcpPort uint16) {
 		vc, err := ln.Accept()
 		if err != nil {
 			log.Printf("[traffic] inbound accept error: %v", err)
+			continue
+		}
+		if !vsockPeerCIDMatches(vc, expectedCID) {
+			log.Printf("[traffic] inbound rejected VSOCK peer %s on VSOCK:%d; expected CID %d", vc.RemoteAddr(), vsockPort, expectedCID)
+			vc.Close()
 			continue
 		}
 		if !limiter.tryAcquire() {
@@ -339,7 +353,7 @@ func bridgeToTCP(src net.Conn, tcpPort uint16) error {
 	}
 	defer tcp.Close()
 
-	result := copyBidirectionalResult(src, tcp)
+	result := copyBidirectionalResult(withIdleTimeout(src), withIdleTimeout(tcp))
 	logConnectionf("[bridge:%d] closed target=TCP:%s duration=%s a_to_b=%d b_to_a=%d err_a_to_b=%v err_b_to_a=%v",
 		id, target, time.Since(start), result.AToBBytes, result.BToABytes, result.AToBErr, result.BToAErr)
 	return result.Err()
@@ -513,6 +527,43 @@ func closeWrite(c net.Conn) {
 	}
 }
 
+func vsockPeerCIDMatches(conn net.Conn, expectedCID uint32) bool {
+	addr, ok := conn.RemoteAddr().(*vsock.Addr)
+	return ok && addr.ContextID == expectedCID
+}
+
+func withIdleTimeout(conn net.Conn) net.Conn {
+	if configuredBridgeIdleTimeout <= 0 {
+		return conn
+	}
+	return &idleTimeoutConn{Conn: conn, timeout: configuredBridgeIdleTimeout}
+}
+
+type idleTimeoutConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *idleTimeoutConn) Read(b []byte) (int, error) {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Read(b)
+}
+
+func (c *idleTimeoutConn) Write(b []byte) (int, error) {
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Write(b)
+}
+
+func (c *idleTimeoutConn) CloseWrite() error {
+	type halfCloser interface {
+		CloseWrite() error
+	}
+	if hc, ok := c.Conn.(halfCloser); ok {
+		return hc.CloseWrite()
+	}
+	return nil
+}
+
 func writeAll(w io.Writer, data []byte) error {
 	for len(data) > 0 {
 		n, err := w.Write(data)
@@ -561,6 +612,27 @@ func envBool(name string, fallback bool) bool {
 		return fallback
 	}
 	return parsed
+}
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		log.Printf("invalid %s=%q; using %s", name, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func envString(name, fallback string) string {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 type connectionLimiter struct {
