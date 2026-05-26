@@ -1,0 +1,8 @@
+.git
+.argonaut-ci-artifacts
+.gocache
+dist
+argonaut
+*.test
+*.cover
+coverage.out

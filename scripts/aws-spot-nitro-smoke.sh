@@ -86,11 +86,11 @@ archive_repo() {
     status="$(git -C "$ROOT" status --short)"
     if [[ -n "$status" ]]; then
       log "repo has uncommitted changes; overlaying working tree into archive"
-    COPYFILE_DISABLE=1 tar --exclude='.git' --exclude='.argonaut-ci-artifacts' --exclude='argonaut' --exclude='*.test' --exclude='coverage.out' \
+    COPYFILE_DISABLE=1 tar --exclude='.git' --exclude='.argonaut-ci-artifacts' --exclude='dist' --exclude='argonaut' --exclude='*.test' --exclude='coverage.out' \
         -C "$ROOT" -rf "$out" .
     fi
   else
-    COPYFILE_DISABLE=1 tar --exclude='.git' --exclude='.argonaut-ci-artifacts' --exclude='argonaut' --exclude='*.test' --exclude='coverage.out' \
+    COPYFILE_DISABLE=1 tar --exclude='.git' --exclude='.argonaut-ci-artifacts' --exclude='dist' --exclude='argonaut' --exclude='*.test' --exclude='coverage.out' \
       -C "$ROOT" -cf "$out" .
   fi
 }

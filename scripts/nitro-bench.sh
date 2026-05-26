@@ -7,6 +7,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARGONAUT_REPO_ROOT="$ROOT"
+source "$ROOT/scripts/lib/repro.sh"
+argonaut_export_repro_env
+if [[ -n "${ARGONAUT_REQUIRE_PINNED_GO:-}" ]]; then
+  argonaut_verify_go_toolchain
+fi
+
 WORKDIR="${ARGONAUT_BENCH_WORKDIR:-$(mktemp -d)}"
 KEEP_WORKDIR="${ARGONAUT_BENCH_KEEP_WORKDIR:-}"
 EXPORT_RESULTS_DIR="${ARGONAUT_BENCH_RESULTS_DIR:-}"
@@ -22,7 +29,7 @@ PAYLOADS="${ARGONAUT_BENCH_PAYLOADS:-0 1024 32768}"
 DURATION="${ARGONAUT_BENCH_DURATION:-15s}"
 VEGETA_VERSION="${ARGONAUT_BENCH_VEGETA_VERSION:-v12.12.0}"
 
-IMAGE_TAG="argonaut-bench:$(date +%s)"
+IMAGE_TAG="${ARGONAUT_BENCH_IMAGE_TAG:-argonaut-bench:$SOURCE_DATE_EPOCH}"
 EIF_PATH="$WORKDIR/argonaut-bench.eif"
 CONSOLE_LOG="$WORKDIR/enclave-console.log"
 HOST_LOG="$WORKDIR/argonaut-host.log"
@@ -153,9 +160,8 @@ install_vegeta
 
 echo "[bench] building linux binaries"
 (
-  cd "$ROOT"
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o "$WORKDIR/image/argonaut" .
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o "$WORKDIR/image/enclave-bench-server" ./scripts/nitro-bench/enclave-server
+  argonaut_go_build "$WORKDIR/image/argonaut" .
+  argonaut_go_build "$WORKDIR/image/enclave-bench-server" ./scripts/nitro-bench/enclave-server
 )
 
 cat > "$WORKDIR/image/Dockerfile" <<'EOF'

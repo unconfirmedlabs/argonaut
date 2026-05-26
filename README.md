@@ -11,6 +11,7 @@ The same binary runs on the EC2 parent instance and inside the enclave.
 ## Contents
 
 - [Build](#build)
+- [Reproducible Builds](#reproducible-builds)
 - [CLI](#cli)
 - [Configuration](#configuration)
 - [Bridges](#bridges)
@@ -25,10 +26,33 @@ The same binary runs on the EC2 parent instance and inside the enclave.
 ## Build
 
 ```bash
-go test ./...
-go vet ./...
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o argonaut .
+make test
+make vet
+make build
 ```
+
+`make build` emits a static Linux `amd64` binary using the same deterministic
+Go flags as the Nitro build helpers.
+
+## Reproducible Builds
+
+Release and Nitro EIF build inputs are pinned and normalized. The release Go
+toolchain is pinned in `.go-version`; modules are pinned by `go.sum`; and
+`scripts/repro-build.sh` produces deterministic binary, rootfs, Docker context,
+manifest, and optional EIF artifacts:
+
+```bash
+scripts/repro-build.sh --skip-docker
+scripts/repro-build.sh --image-tag argonaut-repro:$(git rev-parse --short HEAD)
+```
+
+On a Nitro host with Docker and `nitro-cli`, the second command also writes
+`dist/repro/argonaut.eif` and `dist/repro/build-enclave.json`. Keep
+`dist/repro/manifest.json` and `build-enclave.json` with any published EIF so
+rebuilders can compare artifact hashes and Nitro PCR measurements.
+
+See [docs/reproducible-builds.md](docs/reproducible-builds.md) for the full
+reproducibility contract.
 
 ## CLI
 
@@ -206,9 +230,10 @@ go test -run=Fuzz -fuzz=FuzzHandleNsmLine -fuzztime=10s
 go test -run=Fuzz -fuzz=FuzzParseConfig -fuzztime=10s
 ```
 
-Build release artifacts with a patched Go toolchain and run a real Nitro smoke
+Build release artifacts with the pinned Go toolchain and run a real Nitro smoke
 test before publishing binaries; local tests cannot exercise `/dev/nsm` or
-AF_VSOCK on non-Nitro hosts.
+AF_VSOCK on non-Nitro hosts. Use `scripts/repro-build.sh` for release binaries
+and EIF inputs.
 
 ## Nitro Smoke Test
 

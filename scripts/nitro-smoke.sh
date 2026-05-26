@@ -7,6 +7,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARGONAUT_REPO_ROOT="$ROOT"
+source "$ROOT/scripts/lib/repro.sh"
+argonaut_export_repro_env
+if [[ -n "${ARGONAUT_REQUIRE_PINNED_GO:-}" ]]; then
+  argonaut_verify_go_toolchain
+fi
+
 WORKDIR="${ARGONAUT_SMOKE_WORKDIR:-$(mktemp -d)}"
 KEEP_WORKDIR="${ARGONAUT_SMOKE_KEEP_WORKDIR:-}"
 
@@ -20,7 +27,7 @@ LOCAL_PORT="${ARGONAUT_SMOKE_LOCAL_PORT:-9443}"
 ENCLAVE_CPUS="${ARGONAUT_SMOKE_CPUS:-2}"
 ENCLAVE_MEMORY="${ARGONAUT_SMOKE_MEMORY:-1024}"
 
-IMAGE_TAG="argonaut-smoke:$(date +%s)"
+IMAGE_TAG="${ARGONAUT_SMOKE_IMAGE_TAG:-argonaut-smoke:$SOURCE_DATE_EPOCH}"
 EIF_PATH="$WORKDIR/argonaut-smoke.eif"
 CONSOLE_LOG="$WORKDIR/enclave-console.log"
 HOST_LOG="$WORKDIR/argonaut-host.log"
@@ -108,10 +115,9 @@ touch "$WORKDIR/image/dev/.keep" "$WORKDIR/image/tmp/.keep"
 
 echo "[smoke] building linux binaries"
 (
-  cd "$ROOT"
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o "$WORKDIR/image/argonaut" .
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o "$WORKDIR/image/enclave-smoke-runner" ./scripts/nitro-smoke/enclave-runner
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o "$WORKDIR/host-echo" ./scripts/nitro-smoke/host-echo
+  argonaut_go_build "$WORKDIR/image/argonaut" .
+  argonaut_go_build "$WORKDIR/image/enclave-smoke-runner" ./scripts/nitro-smoke/enclave-runner
+  argonaut_go_build "$WORKDIR/host-echo" ./scripts/nitro-smoke/host-echo
 )
 
 cat > "$WORKDIR/image/Dockerfile" <<'EOF'
